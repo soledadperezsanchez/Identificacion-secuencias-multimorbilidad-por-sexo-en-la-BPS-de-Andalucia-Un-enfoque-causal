@@ -1,0 +1,945 @@
+---
+title: 'R markdown: Identificación y comparación de secuencias de multimorbilidad   longitudinales
+  por sexo en la Base Poblacional de Salud de Andalucía'
+author: "Soledad Pérez Sánchez"
+date: "2024-05-11"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+
+## Librerías
+Instalamos las librerías: 
+```{r, warning=FALSE, message=FALSE}
+library(dbnR)
+library(bnlearn)
+library(data.table)  
+library(readxl)
+library(visNetwork)
+library(igraph)
+library(dplyr)
+library(factoextra)
+library(leiden)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(ggplot2)
+```
+
+
+## Datos
+Cargamos los datos:
+
+```{r}
+# Cargamos los datos:
+dat_mujeres <- read_excel("data_mujeres.xlsx")
+dat_hombres <- read_excel("data_hombres.xlsx")
+
+# Eliminamos la primera columna (es el identificador):
+dat_mujeres <- dat_mujeres[-1]
+dat_hombres <- dat_hombres[-1]
+
+# Mostramos algunos valores:
+dat_mujeres[1:5, 1:5]
+dat_hombres[1:5, 1:5]
+
+# Diferentes tamaños de size:
+sizes <- c(2:20)
+```
+
+
+
+
+## Construcción de los modelos: 
+
+### Mujeres
+
+```{r, eval=FALSE}
+# Lista para almacenar los resultados de cada modelo:
+# modelos_mujeres <- list()
+
+# Creación de los modelos:
+for (size in sizes) {
+  
+  # Iniciamos el contador de tiempo:
+  t <- proc.time()
+  
+  # Entrenamos el modelo:
+  modelo <- dbnR::learn_dbn_struc(dat_mujeres, size, method = "dmmhc", intra=T)
+  
+  # Preparamos de los datos para validación cruzada:
+  dat_fdt <- fold_dt(dat_mujeres, size)
+  
+  # Cálculo del tiempo de entrenamiento:
+  t_dmmhc <- proc.time() - t
+  
+  # Medición de la fuerza de los arcos:
+  arc_strength <- arc.strength(modelo, dat_fdt, criterion="mi-g") 
+  arcs <- modelo$arcs
+  arcs <- gsub("_t_.*", "", arcs)
+  arcs_df <- as.data.frame(arcs)
+  
+  # Almacenamos los resultados en la lista:
+  modelos_mujeres[[paste0("size_", size)]] <- list(
+    "model" = modelo,
+    "folded_data" = dat_fdt,
+    "arc_strength" = arc_strength,
+    "arcs_df" = arcs_df,
+    "training_time" = t_dmmhc
+  )
+}
+save(modelos_mujeres, file = "modelos_mujeres.RData")
+```
+
+```{r}
+load("modelos_mujeres.RData")
+```
+
+
+
+### Hombres
+
+```{r, eval=FALSE}
+# Lista para almacenar los resultados de cada modelo:
+#modelos_hombres <- list()
+
+# Creación de los modelos:
+for (size in sizes) {
+  
+  # Iniciamos el contador de tiempo:
+  t <- proc.time()
+  
+  # Entrenamos el modelo:
+  modelo <- dbnR::learn_dbn_struc(dat_hombres, size, method = "dmmhc", intra=T)
+  
+  # Preparamos de los datos para validación cruzada:
+  dat_fdt <- fold_dt(dat_hombres, size)
+  
+  # Cálculo del tiempo de entrenamiento:
+  t_dmmhc <- proc.time() - t
+  
+  # Medición de la fuerza de los arcos:
+  arc_strength <- arc.strength(modelo, dat_fdt, criterion="mi-g") 
+  arcs <- modelo$arcs
+  arcs <- gsub("_t_.*", "", arcs)
+  arcs_df <- as.data.frame(arcs)
+  
+  # Almacenamos los resultados en la lista:
+  modelos_hombres[[paste0("size_", size)]] <- list(
+    "model" = modelo,
+    "folded_data" = dat_fdt,
+    "arc_strength" = arc_strength,
+    "arcs_df" = arcs_df,
+    "training_time" = t_dmmhc
+  )
+}
+save(modelos_hombres, file = "modelos_hombres.RData")
+```
+
+```{r}
+load("modelos_hombres.RData")
+```
+
+
+#### Resultados redes bayesianas dinámicas
+
+```{r}
+enf_muj_totales <- colnames(dat_mujeres)
+enf_hom_totales <- colnames(dat_hombres)
+enf_hom_totales[which(enf_hom_totales == "ParkinsonÂ´s disease")] <- "Parkinson´s disease"
+## parkinson está mal escrito en hombres, pero aparece en mujeres y hombres
+enfermedades_totales <- unique(c(enf_muj_totales, enf_hom_totales))
+setdiff(enfermedades_totales, enf_hom_totales)
+setdiff(enfermedades_totales, enf_muj_totales)
+
+
+enfermedades_totales <- as.data.frame(enfermedades_totales)
+colnames(enfermedades_totales) <- "Enfermedades"
+kable(enfermedades_totales, format = "html", align = "l") %>%
+       kable_styling(full_width = F)
+
+```
+
+
+
+```{r}
+info_mujeres <- data.frame(Size = numeric(), Nodos = numeric(), Asociaciones = numeric(), Enfermedades = numeric(), Tiempo = numeric())
+for (i in seq_along(sizes)) {
+  size <- paste0("size_", sizes[i])
+  asoc <- dim(modelos_mujeres[[size]][["model"]][["arcs"]])[1]
+  enf <- length(unique(c(modelos_mujeres[[size]][["arcs_df"]]$from,
+                         modelos_mujeres[[size]][["arcs_df"]]$to)))
+  nodos <- length(modelos_mujeres[[size]][["model"]][["nodes"]])
+  tiempo <- modelos_mujeres[[size]][["training_time"]][["user.self"]] +
+            modelos_mujeres[[size]][["training_time"]][["sys.self"]]
+  fila <- data.frame(Size = sizes[i], Asociaciones = asoc, Nodos = nodos, Enfermedades = enf, Tiempo = tiempo)
+  info_mujeres <- rbind(info_mujeres, fila)
+}
+
+info_hombres <- data.frame(Size = numeric(), Asociaciones = numeric(), Nodos = numeric(), Enfermedades = numeric(), Tiempo = numeric())
+for (i in seq_along(sizes)) {
+  size <- paste0("size_", sizes[i])
+  asoc <- dim(modelos_hombres[[size]][["model"]][["arcs"]])[1]
+  enf <- length(unique(c(modelos_hombres[[size]][["arcs_df"]]$from,
+                         modelos_hombres[[size]][["arcs_df"]]$to)))
+  nodos <- length(modelos_hombres[[size]][["model"]][["nodes"]])
+  tiempo <- modelos_hombres[[size]][["training_time"]][["user.self"]] +
+            modelos_hombres[[size]][["training_time"]][["sys.self"]]
+  fila <- data.frame(Size = sizes[i], Asociaciones = asoc, Nodos = nodos, Enfermedades = enf, Tiempo = tiempo)
+  info_hombres <- rbind(info_hombres, fila)
+}
+```
+
+
+```{r}
+kable(info_mujeres, format = "html") %>%
+    add_header_above(c("Modelos en Mujeres" = 5)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE)
+
+kable(info_hombres, format = "html") %>%
+  add_header_above(c("Modelos en Hombres" = 5)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE)
+```
+
+
+```{r}
+# Grafico para mujeres
+grafico_mujeres <- ggplot(info_mujeres) +
+  geom_line(aes(x = Size, y = Asociaciones, color = "Asociaciones"), size = 0.5) +
+  geom_line(aes(x = Size, y = Nodos, color = "Nodos"), size = 0.5) +
+  labs(x = "Size", y = "Observaciones - segundos/10", 
+       title = "Mujeres") +
+  geom_line(aes(x = Size, y = Tiempo/10, color = "Tiempo"), size = 0.5, linetype = "dashed") +
+  scale_color_manual(values = c("Asociaciones" = "cadetblue3", "Nodos" = "deepskyblue2", "Tiempo" = "purple")) +
+  theme_minimal() +
+  theme(text = element_text(size = 8)) + 
+  guides(colour = guide_legend(title = NULL))
+
+# Grafico para hombres
+grafico_hombres <- ggplot(info_hombres) +
+  geom_line(aes(x = Size, y = Asociaciones, color = "Asociaciones"), size = 0.5) +
+  geom_line(aes(x = Size, y = Nodos, color = "Nodos"), size = 0.5) +
+  labs(x = "Size", y = "Observaciones - segundos/10", 
+       title = "Hombres") +
+  geom_line(aes(x = Size, y = Tiempo/10, color = "Tiempo"), size = 0.5, linetype = "dashed") +
+  scale_color_manual(values = c("Asociaciones" = "cadetblue3", "Nodos" = "deepskyblue2", "Tiempo" = "purple")) +
+  theme_minimal() +
+  theme(text = element_text(size = 8)) +
+  guides(colour = guide_legend(title = NULL))
+
+grid.arrange(grafico_mujeres, grafico_hombres, nrow = 2)
+```
+
+
+
+
+## Cálculo de las asociaciones
+
+### Mujeres
+
+Creamos un dataframe que contenga todas las asociaciones presentes para los diferentes tamaños de size:
+```{r}
+asociaciones_muj <- data.frame()
+for (i in seq_along(sizes)) {
+  size <- paste0("size_", sizes[i])
+  arcs_df <- modelos_mujeres[[size]][["arc_strength"]]
+  arcs_df$weights <- (1 - arcs_df$strength) * 1000
+  arcs_df$from <- gsub("_t_.*", "", arcs_df$from)
+  arcs_df$to <- gsub("_t_.*", "", arcs_df$to)
+  arcs_df$arcs <- paste(arcs_df$from, arcs_df$to, sep = "|")
+  arcs_df <- arcs_df[,4:5]
+  arcs_df <- arcs_df %>%                
+    group_by(arcs) %>%
+    summarise(weights = sum(weights)) # las asociaciones que estén repetidas en un mismo tamaño, 
+                                      # se agregarán para el cálculo del peso de esa asociación
+  asociaciones_muj <- rbind(asociaciones_muj, arcs_df)
+}
+```
+
+### Hombres
+
+Lo mismo para los hombres:
+```{r}
+asociaciones_hom <- data.frame()
+for (i in seq_along(sizes)) {
+  size <- paste0("size_", sizes[i])
+  arcs_df <- modelos_hombres[[size]][["arc_strength"]]
+  arcs_df$weights <- (1 - arcs_df$strength) * 1000
+  arcs_df$from <- gsub("_t_.*", "", arcs_df$from)
+  arcs_df$to <- gsub("_t_.*", "", arcs_df$to)
+  arcs_df$arcs <- paste(arcs_df$from, arcs_df$to, sep = "|")
+  arcs_df <- arcs_df[,4:5]
+  arcs_df <- arcs_df %>%                
+    group_by(arcs) %>%
+    summarise(weights = sum(weights)) # las asociaciones que estén repetidas en un mismo tamaño, 
+                                      # se agregarán para el cálculo del peso de esa asociación
+  asociaciones_hom <- rbind(asociaciones_hom, arcs_df)
+}
+```
+
+
+## Asociaciones únicas
+
+```{r}
+length(unique(asociaciones_muj$arcs))
+length(unique(asociaciones_hom$arcs))
+```
+
+
+
+## Filtros en las asociaciones
+
+Vamos a crear una función que aplique los diferentes filtros a cada conjunto de datos y sus asociaciones, con el porcentaje de sizes que queramos.
+
+Los filtros aplicados serán:
+
+Filtro 1: Se seleccionan las asociaciones que estén presentes en el porcentaje de veces de sizes que queramos. Los pesos asociados a estas asociaciones serán el promedio de los pesos de esa asociación para los diferentes tamaños de sizes. 
+
+Filtro 2: Se eliminan aquellas asociaciones que establezcan a una enfermedad como causa de sí misma.
+
+Filtro 3: Se eliminan las asociaciones bidireccionales (se guardarán en otro dataframe para poder comentarlas posteriormente).
+
+Filtro 4: Se eliminan el resto de asociaciones que producen un ciclo.
+
+Posteriormente, a partir de las asociaciones filtradas se construirá la red, y se agruparán los nodos utilizando el algoritmo Kmeans y Leiden. 
+
+
+```{r}
+# Creamos la función calculo_asociaciones
+calculo_asociaciones <- function(datos, asociaciones, porcentaje) {
+  # Calculamos la transpuesta de los datos para que las observaciones sean las enfermedades:
+  datos <- t(datos)
+  
+  # Filtro 1:
+  num_sizes <- ceiling((porcentaje / 100) * length(sizes))
+  asociaciones_filtro1 <- table(asociaciones$arcs) >= num_sizes
+  asociaciones_filtro1 <- as.data.frame(names(asociaciones_filtro1[asociaciones_filtro1]))
+  colnames(asociaciones_filtro1) <- "arcs"
+  asociaciones_filtro1 <- subset(asociaciones, arcs %in% asociaciones_filtro1$arcs)
+  weights_promedio <- aggregate(weights ~ arcs, data = asociaciones_filtro1, FUN = mean)
+  
+  # Se crea el dataframe que será el final con las asociaciones separadas:
+  asociaciones_resultado <- data.frame(from = sapply(strsplit(weights_promedio$arcs, 
+                                                              split = "|", 
+                                                              fixed = TRUE), "[[", 1),
+                                    to = sapply(strsplit(weights_promedio$arcs, 
+                                                         split = "|", 
+                                                         fixed = TRUE), "[[", 2),
+                                    stringsAsFactors = FALSE)
+  asociaciones_resultado$weights <- weights_promedio$weights
+  
+  # Filtro 2:
+  asociaciones_resultado <- subset(asociaciones_resultado, from != to)
+  
+  # Filtro 3:
+  asociaciones_bidireccionales <- asociaciones_resultado
+  asociaciones_bidireccionales$from <- asociaciones_resultado$to
+  asociaciones_bidireccionales$to <- asociaciones_resultado$from
+  asociaciones_bidireccionales <- rbind(asociaciones_resultado, asociaciones_bidireccionales)
+  asociaciones_bidireccionales <- 
+    asociaciones_bidireccionales[duplicated(asociaciones_bidireccionales[c("from", "to")]), ]
+  asociaciones_bidireccionales <- 
+    asociaciones_resultado[asociaciones_resultado$from %in% asociaciones_bidireccionales$from 
+                           & asociaciones_resultado$to %in% asociaciones_bidireccionales$to, ]
+  asociaciones_resultado <- subset(asociaciones_resultado, 
+                                   !(from %in% asociaciones_bidireccionales$from 
+                                     & to %in% asociaciones_bidireccionales$to))
+  
+  
+  # Cálculo de las enfermedades (nodos) presentes para esos sizes y de los datos teniendo en cuenta
+  # sólo esas enfermedades.
+  nodos <- unique(c(unique(asociaciones_resultado$from), unique(asociaciones_resultado$to)))
+  datos_filtrados <- subset(datos, rownames(datos) %in% nodos)
+  nodos <- as.data.frame(rownames(datos_filtrados))
+
+  # Dibujo de la red:
+  grafo <- graph_from_data_frame(asociaciones_resultado[, -3], directed = TRUE, vertices = nodos)
+
+  # Filtro 4
+  while (!is_dag(grafo)) {
+  n <- vcount(grafo)
+  visitado <- rep(FALSE, n)
+  en_pila <- rep(FALSE, n)
+  ciclo <- NULL
+  dfs <- function(node, path) {
+    if (visitado[node]) {
+      if (en_pila[node]) {
+        ciclo <<- path[which(path == node):length(path)]
+      }
+      return()
+    }
+    visitado[node] <<- TRUE
+    en_pila[node] <<- TRUE
+    for (vecino in neighbors(grafo, node)) {
+      dfs(vecino, c(path, vecino))
+      if (!is.null(ciclo)) return()
+    }
+    en_pila[node] <<- FALSE
+  }
+
+  for (i in 1:n) {
+    if (!visitado[i]) {
+      dfs(i, i)
+      if (!is.null(ciclo)) break
+    }
+  }
+  
+  nombres_ciclo <- vertex_attr(grafo, "name")[ciclo]
+  enfermedades_concatenadas <- sapply(1:(length(nombres_ciclo) - 1), function(i) {
+    paste(nombres_ciclo[i], nombres_ciclo[i + 1], sep = "|")
+  })
+
+  asociaciones_resultado <- asociaciones_resultado
+  asociaciones_filtro4 <- paste(asociaciones_resultado$from, asociaciones_resultado$to, sep = "|")
+  asociaciones_filtro4 <- as.data.frame(asociaciones_filtro4)
+  asociaciones_filtro4$weights <- asociaciones_resultado$weights
+
+  asociaciones_ciclo <- 
+    asociaciones_filtro4[asociaciones_filtro4$asociaciones_filtro4 %in% enfermedades_concatenadas, ]
+  asociacion_menor <- asociaciones_ciclo[which.min(asociaciones_ciclo$weights), 1]
+
+  asociaciones_filtro4 <- subset(asociaciones_filtro4, asociaciones_filtro4 != asociacion_menor)
+  pesos <- asociaciones_filtro4$weights
+
+  asociaciones_filtro4 <- data.frame(
+    from = sapply(strsplit(asociaciones_filtro4$asociaciones_filtro4, 
+                           split = "|", 
+                           fixed = TRUE), 
+                  "[[", 1),
+    to = sapply(strsplit(asociaciones_filtro4$asociaciones_filtro4, 
+                         split = "|", 
+                         fixed = TRUE), 
+                "[[", 2), 
+    stringsAsFactors = FALSE)
+
+  asociaciones_filtro4$weights <- pesos
+  
+  asociaciones_resultado <- asociaciones_filtro4
+
+  nodos <- unique(c(unique(asociaciones_resultado$from), unique(asociaciones_resultado$to)))
+  datos_filtrados <- subset(datos, rownames(datos) %in% nodos)
+  nodos <- as.data.frame(rownames(datos_filtrados))
+
+  grafo <- graph_from_data_frame(asociaciones_resultado[, -3], directed = TRUE, vertices = nodos)
+  }
+  
+  # Le añadimos los pesos al grafo
+  E(grafo)$weight <- asociaciones_resultado[, 3]
+  
+  # Guardamos algunos resultados 
+  list(arcos = asociaciones_resultado, nodos = nodos, 
+       asociaciones_bidereccionales = asociaciones_bidireccionales, grafo = grafo)
+}
+```
+
+
+## Dibujo de los grafos
+
+
+```{r, warning=FALSE}
+porc <- seq(0, 100, by = 5)
+tablas_red_muj <- data.frame(Porcentaje = numeric(), Asociaciones = numeric(), Nodos = numeric()
+                             )
+for (i in porc) {
+  red <- calculo_asociaciones(dat_mujeres, asociaciones_muj, i)
+  num = i
+  asoc <- dim(red$arcos)[1]
+  nod <- dim(red$nodos)[1]
+  fila <- data.frame(Porcentaje = i, Asociaciones = asoc, Nodos = nod)
+  tablas_red_muj <- rbind(tablas_red_muj, fila)
+}
+
+
+tablas_red_hom <- data.frame(Porcentaje = numeric(), Asociaciones = numeric(), Nodos = numeric())
+for (i in porc) {
+  red <- calculo_asociaciones(dat_hombres, asociaciones_hom, i)
+  num = i
+  asoc <- dim(red$arcos)[1]
+  nod <- dim(red$nodos)[1]
+  fila <- data.frame(Porcentaje = i, Asociaciones = asoc, Nodos = nod)
+  tablas_red_hom <- rbind(tablas_red_hom, fila)
+}
+```
+
+
+```{r}
+# Grafico para mujeres
+grafico_mujeres <- ggplot(tablas_red_muj) +
+  geom_line(aes(x = Porcentaje, y = Asociaciones, color = "Asociaciones"), size = 0.5) +
+  geom_line(aes(x = Porcentaje, y = Nodos, color = "Nodos"), size = 0.5) +
+  labs(x = "Porcentajes", y=' ', title = "Mujeres") +
+  scale_color_manual(values = c("Asociaciones" = "cadetblue3", "Nodos" = "deepskyblue2")) +
+  theme_minimal() +
+  theme(text = element_text(size = 8)) + 
+  guides(colour = guide_legend(title = NULL))
+
+# Grafico para hombres
+grafico_hombres <- ggplot(tablas_red_hom) +
+  geom_line(aes(x = Porcentaje, y = Asociaciones, color = "Asociaciones"), size = 0.5) +
+  geom_line(aes(x = Porcentaje, y = Nodos, color = "Nodos"), size = 0.5) +
+  labs(x = "Porcentajes", y = " ", title = "Hombres") +
+  scale_color_manual(values = c("Asociaciones" = "cadetblue3", "Nodos" = "deepskyblue2")) +
+  theme_minimal() +
+  theme(text = element_text(size = 8)) + 
+  guides(colour = guide_legend(title = NULL))
+
+grid.arrange(grafico_mujeres, grafico_hombres, nrow = 2)
+```
+
+```{r}
+kable(tablas_red_muj[-1,], format = "html", row.names = FALSE) %>%
+    add_header_above(c("Resultados en Mujeres" = 3)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE)
+
+kable(tablas_red_hom[-1,], format = "html", row.names = FALSE) %>%
+    add_header_above(c("Resultados en Hombres" = 3)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE)
+```
+
+
+
+
+## Dibujo de los grafos
+
+
+#### 100% sizes 
+
+```{r, warning=FALSE}
+muj_100 <- calculo_asociaciones(dat_mujeres, asociaciones_muj, 100)
+```
+
+```{r}
+dim(muj_100$arcos)[1]
+dim(muj_100$nodos)[1]
+```
+
+```{r, warning=FALSE}
+hom_100 <- calculo_asociaciones(dat_hombres, asociaciones_hom, 100)
+```
+
+```{r}
+dim(hom_100$arcos)[1]
+dim(hom_100$nodos)[1]
+```
+
+
+```{r}
+visIgraph(muj_100$grafo)
+visIgraph(hom_100$grafo)
+```
+
+
+
+
+#### 75% sizes 
+
+```{r, warning=FALSE}
+muj_75 <- calculo_asociaciones(dat_mujeres, asociaciones_muj, 75)
+```
+
+```{r}
+dim(muj_75$arcos)[1]
+dim(muj_75$nodos)[1]
+```
+
+```{r, warning=FALSE}
+hom_75 <- calculo_asociaciones(dat_hombres, asociaciones_hom, 75)
+```
+
+```{r}
+dim(hom_75$arcos)[1]
+dim(hom_75$nodos)[1]
+```
+
+```{r}
+visIgraph(muj_75$grafo)
+visIgraph(hom_75$grafo)
+```
+
+
+
+#### 50% sizes 
+
+```{r, warning=FALSE}
+muj_50 <- calculo_asociaciones(dat_mujeres, asociaciones_muj, 50)
+```
+
+```{r}
+dim(muj_50$arcos)[1]
+dim(muj_50$nodos)[1]
+```
+
+```{r, warning=FALSE}
+hom_50 <- calculo_asociaciones(dat_hombres, asociaciones_hom, 50)
+```
+
+```{r}
+dim(hom_50$arcos)[1]
+dim(hom_50$nodos)[1]
+```
+
+```{r}
+visIgraph(muj_50$grafo)
+visIgraph(hom_50$grafo)
+```
+
+
+
+
+
+#### 25% sizes 
+
+```{r, warning=FALSE}
+muj_25 <- calculo_asociaciones(dat_mujeres, asociaciones_muj, 25)
+```
+
+```{r}
+dim(muj_25$arcos)[1]
+dim(muj_25$nodos)[1]
+```
+
+```{r, warning=FALSE}
+hom_25 <- calculo_asociaciones(dat_hombres, asociaciones_hom, 25)
+```
+
+```{r}
+dim(hom_25$arcos)[1]
+dim(hom_25$nodos)[1]
+```
+
+```{r}
+visIgraph(muj_25$grafo)
+visIgraph(hom_25$grafo)
+```
+
+
+
+#### 1% sizes 
+
+```{r, warning=FALSE}
+muj_1 <- calculo_asociaciones(dat_mujeres, asociaciones_muj, 1)
+```
+
+```{r}
+dim(muj_1$arcos)[1]
+dim(muj_1$nodos)[1]
+```
+
+```{r, warning=FALSE}
+hom_1 <- calculo_asociaciones(dat_hombres, asociaciones_hom, 1)
+```
+
+```{r}
+dim(hom_1$arcos)[1]
+dim(hom_1$nodos)[1]
+```
+
+```{r}
+visIgraph(muj_1$grafo)
+visIgraph(hom_1$grafo)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Clustering 100% sizes
+
+
+#### Mujeres
+
+```{r, warning=FALSE}
+results <- data.frame(
+  resolution_parameter = numeric(),
+  num_clusters = integer(),
+  modularity_value = numeric()
+)
+
+for (i in seq(0, 2, 0.25)) {
+  resolution_parameter <- i
+  leiden_partition <- leiden(muj_100$grafo, 
+                             weights = "weight", 
+                             resolution_parameter = resolution_parameter, 
+                             seed = 1234)
+  
+  modularity_value <- modularity(muj_100$grafo, leiden_partition)
+  
+  results <- rbind(results, data.frame(
+    resolution_parameter = resolution_parameter,
+    num_clusters = length(table(leiden_partition)),
+    modularity_value = modularity_value))
+}
+
+colnames(results) <- c("Resolución", "Clusters", "Modularidad")
+results$Modularidad <- round(results$Modularidad, 3)
+
+results_transposed <- t(results)
+results_transposed <- as.data.frame(results_transposed)
+colnames(results_transposed) <- results_transposed[1,]
+results_transposed <- results_transposed[-1,]
+results_transposed[1,] <- format(results_transposed[1,], scientific = FALSE, trim = TRUE)
+
+results_transposed %>%
+  kable(caption = "Resoluciones Algoritmo Leiden") %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+
+```{r, warning=FALSE}
+leid <- leiden(muj_100$grafo, weights = "weight", resolution_parameter = 1.25, seed = 1234)
+cluster_enf_muj_100_leiden <- cbind(muj_100$nodos, cluster=leid)
+colnames(cluster_enf_muj_100_leiden) <- c("nodos", "cluster")
+rownames(cluster_enf_muj_100_leiden) <- NULL
+
+V(muj_100$grafo)$color <- leid
+visIgraph(muj_100$grafo)%>% 
+  visNodes(font = list(size = 25))
+
+
+enfermedades_por_cluster_muj <- aggregate(nodos ~ cluster, data = cluster_enf_muj_100_leiden, FUN = function(x) paste(x, collapse = ", "))
+names(enfermedades_por_cluster_muj) <- c("Cluster", "Enfermedades")
+kable(enfermedades_por_cluster_muj, caption = "Enfermedades mujeres por cluster") %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### Hombres
+
+```{r, warning=FALSE}
+results <- data.frame(
+  resolution_parameter = numeric(),
+  num_clusters = integer(),
+  modularity_value = numeric()
+)
+
+for (i in seq(0, 2, 0.25)) {
+  resolution_parameter <- i
+  leiden_partition <- leiden(hom_100$grafo, 
+                             weights = "weight", 
+                             resolution_parameter = resolution_parameter, 
+                             seed = 1234)
+  
+  modularity_value <- modularity(hom_100$grafo, leiden_partition)
+  
+  results <- rbind(results, data.frame(
+    resolution_parameter = resolution_parameter,
+    num_clusters = length(table(leiden_partition)),
+    modularity_value = modularity_value))
+}
+
+colnames(results) <- c("Resolución", "Clusters", "Modularidad")
+results$Modularidad <- round(results$Modularidad, 3)
+
+results_transposed <- t(results)
+results_transposed <- as.data.frame(results_transposed)
+colnames(results_transposed) <- results_transposed[1,]
+results_transposed <- results_transposed[-1,]
+results_transposed[1,] <- format(results_transposed[1,], scientific = FALSE, trim = TRUE)
+
+results_transposed %>%
+  kable(caption = "Resoluciones Algoritmo Leiden") %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+
+```{r, warning=FALSE}
+leid <- leiden(hom_100$grafo, weights = "weight", resolution_parameter = 0.25, seed = 1234)
+cluster_enf_hom_100_leiden <- cbind(hom_100$nodos, cluster=leid)
+colnames(cluster_enf_hom_100_leiden) <- c("nodos", "cluster")
+rownames(cluster_enf_hom_100_leiden) <- NULL
+
+V(hom_100$grafo)$color <- leid
+visIgraph(hom_100$grafo)%>% 
+  visNodes(font = list(size = 25))
+
+
+enfermedades_por_cluster_hom <- aggregate(nodos ~ cluster, data = cluster_enf_hom_100_leiden, FUN = function(x) paste(x, collapse = ", "))
+names(enfermedades_por_cluster_hom) <- c("Cluster", "Enfermedades")
+kable(enfermedades_por_cluster_hom, caption = "Enfermedades hombres por cluster") %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+
+## kmeans
+
+```{r}
+dat_mujeres_t <- t(dat_mujeres)
+enf_kmeans_muj <- data.frame(Enfermedades = rownames(dat_mujeres_t))
+
+set.seed(1234)
+fviz_nbclust(dat_mujeres_t, kmeans, method = "wss") + 
+  labs(subtitle = "Elbow method") + 
+  theme_minimal()
+
+
+kmeans_clust <- kmeans(dat_mujeres_t, centers = 3)
+enf_kmeans_muj$clusters<- kmeans_clust$cluster
+
+enf_kmeans_muj <- enf_kmeans_muj[enf_kmeans_muj$Enfermedades %in% muj_100$nodos$`rownames(datos_filtrados)`, ]
+```
+
+
+```{r}
+V(muj_100$grafo)$color <- enf_kmeans_muj$clusters
+visIgraph(muj_100$grafo)%>% 
+  visNodes(font = list(size = 25))
+```
+
+```{r}
+table(enf_kmeans_muj$clusters)
+enfermedades_por_cluster_muj <- aggregate(Enfermedades ~ clusters, data = enf_kmeans_muj, FUN = function(x) paste(x, collapse = ", "))
+names(enfermedades_por_cluster_muj) <- c("Cluster", "Enfermedades")
+kable(enfermedades_por_cluster_muj, caption = "Enfermedades mujeres por cluster") %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+```{r}
+dat_hombres_t <- t(dat_hombres)
+enf_kmeans_hom <- data.frame(Enfermedades = rownames(dat_hombres_t))
+
+set.seed(1234)
+fviz_nbclust(dat_hombres_t, kmeans, method = "wss") + 
+  labs(subtitle = "Elbow method") + 
+  theme_minimal()
+
+
+kmeans_clust <- kmeans(dat_hombres_t, centers = 4)
+enf_kmeans_hom$clusters<- kmeans_clust$cluster
+
+enf_kmeans_hom <- enf_kmeans_hom[enf_kmeans_hom$Enfermedades %in% hom_100$nodos$`rownames(datos_filtrados)`, ]
+```
+
+
+```{r}
+V(hom_100$grafo)$color <- enf_kmeans_hom$clusters
+visIgraph(hom_100$grafo)%>% 
+  visNodes(font = list(size = 25))
+```
+
+
+
+```{r}
+enfermedades_por_cluster_hom <- aggregate(Enfermedades ~ clusters, data = enf_kmeans_hom, FUN = function(x) paste(x, collapse = ", "))
+names(enfermedades_por_cluster_hom) <- c("Cluster", "Enfermedades")
+kable(enfermedades_por_cluster_hom, caption = "Enfermedades hombres por cluster") %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+
+
+## comparacion sec
+
+
+```{r}
+nodos_muj_analizar <- subset(cluster_enf_muj_100_leiden, cluster %in% c(1,2,3,4,5), select = "nodos")
+arcos_muj_analizar <- subset(muj_100$arcos, from %in% nodos_muj_analizar$nodos | to %in% nodos_muj_analizar$nodos)
+
+nodos_hom_analizar <- subset(cluster_enf_hom_100_leiden, cluster %in% c(1,2,3), select = "nodos")
+arcos_hom_analizar <- subset(hom_100$arcos, from %in% nodos_hom_analizar$nodos | to %in% nodos_hom_analizar$nodos)
+
+arcos <- paste(arcos_muj_analizar$from, arcos_muj_analizar$to, sep = "|")
+arcos_muj_analizar2 <- data.frame(arcos)
+arcos_muj_analizar2$peso <- arcos_muj_analizar$weights
+
+arcos <- paste(arcos_hom_analizar$from, arcos_hom_analizar$to, sep = "|")
+arcos_hom_analizar2 <- data.frame(arcos)
+arcos_hom_analizar2$peso <- arcos_hom_analizar$weights
+
+intersect(arcos_muj_analizar2$arcos, arcos_hom_analizar2$arcos)
+
+head(arcos_muj_analizar2[order(-arcos_muj_analizar2$peso), ])
+head(arcos_hom_analizar2[order(-arcos_hom_analizar2$peso), ])
+```
+
+
+```{r}
+grupo1_muj <- subset(cluster_enf_muj_100_leiden, cluster %in% 1, select = "nodos")
+arcos_muj1 <- subset(muj_100$arcos, from %in% grupo1_muj$nodos | to %in% grupo1_muj$nodos)
+
+grupo2_muj <- subset(cluster_enf_muj_100_leiden, cluster %in% 2, select = "nodos")
+arcos_muj2 <- subset(muj_100$arcos, from %in% grupo2_muj$nodos | to %in% grupo2_muj$nodos)
+
+grupo3_muj <- subset(cluster_enf_muj_100_leiden, cluster %in% 3, select = "nodos")
+arcos_muj3 <- subset(muj_100$arcos, from %in% grupo3_muj$nodos | to %in% grupo3_muj$nodos)
+
+grupo4_muj <- subset(cluster_enf_muj_100_leiden, cluster %in% 4, select = "nodos")
+arcos_muj4 <- subset(muj_100$arcos, from %in% grupo4_muj$nodos | to %in% grupo4_muj$nodos)
+
+grupo5_muj <- subset(cluster_enf_muj_100_leiden, cluster %in% 6, select = "nodos")
+arcos_muj5 <- subset(muj_100$arcos, from %in% grupo5_muj$nodos | to %in% grupo5_muj$nodos)
+```
+
+
+
+```{r}
+grupo1_hom <- subset(cluster_enf_hom_100_leiden, cluster %in% 1, select = "nodos")
+arcos_hom1 <- subset(hom_100$arcos, from %in% grupo1_hom$nodos | to %in% grupo1_hom$nodos)
+
+grupo2_hom <- subset(cluster_enf_hom_100_leiden, cluster %in% 2, select = "nodos")
+arcos_hom2 <- subset(hom_100$arcos, from %in% grupo2_hom$nodos | to %in% grupo2_hom$nodos)
+
+grupo3_hom <- subset(cluster_enf_hom_100_leiden, cluster %in% 3, select = "nodos")
+arcos_hom3 <- subset(hom_100$arcos, from %in% grupo3_hom$nodos | to %in% grupo3_hom$nodos)
+```
+
+
+
+
+
+
